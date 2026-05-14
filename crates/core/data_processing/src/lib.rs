@@ -3,7 +3,42 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use kpodjito_core_tensor::Tensor;
 pub use kpodjito_core_error::{Error, Result};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Normalization {
+    None,
+    Standard,
+    MinMax,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadConfig {
+    pub delimiter: char,
+    pub has_header: bool,
+    pub target_column: Option<usize>,
+    pub normalization: Normalization,
+}
+
+impl Default for LoadConfig {
+    fn default() -> Self {
+        Self {
+            delimiter: ',',
+            has_header: true,
+            target_column: None,
+            normalization: Normalization::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TensorDataset {
+    pub features: Tensor<f32>,
+    pub targets: Option<Tensor<f32>>,
+    pub feature_names: Vec<String>,
+    pub target_name: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DataType {
@@ -104,6 +139,8 @@ impl Default for ScanOptions {
 }
 
 pub struct DataTypeDetector;
+
+pub struct TrainingDataLoader;
 
 impl DataTypeDetector {
     pub fn detect(path: Option<&str>, bytes: &[u8]) -> Detection {
@@ -230,6 +267,321 @@ impl DataTypeDetector {
             modality_stats,
             overall_confidence,
         })
+    }
+}
+
+impl TrainingDataLoader {
+    pub fn load_from_path(path: &str, config: &LoadConfig) -> Result<TensorDataset> {
+        let bytes = fs::read(path).map_err(|error| Error::InvalidDataFormat {
+            details: format!("cannot read dataset path {path}: {error}"),
+        })?;
+        Self::load_from_bytes(Some(path), &bytes, config)
+    }
+
+    pub fn load_from_bytes(path: Option<&str>, bytes: &[u8], config: &LoadConfig) -> Result<TensorDataset> {
+        let detected = DataTypeDetector::detect(path, bytes);
+        match detected.data_type {
+            DataType::Text => {
+                let text = std::str::from_utf8(bytes).map_err(|error| Error::InvalidDataFormat {
+                    details: format!("dataset is not utf8 text: {error}"),
+                })?;
+                Self::load_from_text(text, config)
+            }
+            DataType::Empty => Err(Error::InvalidDataFormat {
+                details: "dataset payload is empty".to_string(),
+            }),
+            _ => Err(Error::UnsupportedDataType {
+                details: format!(
+                    "currently only text/tabular datasets are supported for tensor loading, detected {:?}",
+                    detected.data_type
+                ),
+            }),
+        }
+    }
+
+    pub fn load_from_text(text: &str, config: &LoadConfig) -> Result<TensorDataset> {
+        let parsed = parse_csv_numeric(text, config)?;
+        let features = Tensor::new(vec![parsed.rows, parsed.feature_cols], parsed.features)?;
+        let targets = if let Some(target_data) = parsed.targets {
+            Some(Tensor::new(vec![parsed.rows, 1], target_data)?)
+        } else {
+            None
+        };
+
+        Ok(TensorDataset {
+            features,
+            targets,
+            feature_names: parsed.feature_names,
+            target_name: parsed.target_name,
+        })
+    }
+
+    pub fn train_valid_split(
+        dataset: &TensorDataset,
+        valid_ratio: f32,
+    ) -> Result<(TensorDataset, TensorDataset)> {
+        if !(0.0..1.0).contains(&valid_ratio) {
+            return Err(Error::InvalidDataFormat {
+                details: format!("valid_ratio must be in [0,1), got {valid_ratio}"),
+            });
+        }
+
+        let rows = dataset.features.shape().dims()[0];
+        let cols = dataset.features.shape().dims()[1];
+        if rows < 2 {
+            return Err(Error::InvalidDataFormat {
+                details: "at least 2 rows are required to split train/validation".to_string(),
+            });
+        }
+
+        let valid_rows = ((rows as f32) * valid_ratio).round() as usize;
+        let valid_rows = valid_rows.min(rows - 1);
+        let train_rows = rows - valid_rows;
+
+        let feature_data = dataset.features.data();
+        let train_feature_data = feature_data[..train_rows * cols].to_vec();
+        let valid_feature_data = feature_data[train_rows * cols..].to_vec();
+
+        let train_features = Tensor::new(vec![train_rows, cols], train_feature_data)?;
+        let valid_features = Tensor::new(vec![valid_rows, cols], valid_feature_data)?;
+
+        let (train_targets, valid_targets) = if let Some(targets) = &dataset.targets {
+            let target_data = targets.data();
+            let train_target_data = target_data[..train_rows].to_vec();
+            let valid_target_data = target_data[train_rows..].to_vec();
+            (
+                Some(Tensor::new(vec![train_rows, 1], train_target_data)?),
+                Some(Tensor::new(vec![valid_rows, 1], valid_target_data)?),
+            )
+        } else {
+            (None, None)
+        };
+
+        let train = TensorDataset {
+            features: train_features,
+            targets: train_targets,
+            feature_names: dataset.feature_names.clone(),
+            target_name: dataset.target_name.clone(),
+        };
+        let valid = TensorDataset {
+            features: valid_features,
+            targets: valid_targets,
+            feature_names: dataset.feature_names.clone(),
+            target_name: dataset.target_name.clone(),
+        };
+
+        Ok((train, valid))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTabular {
+    rows: usize,
+    feature_cols: usize,
+    features: Vec<f32>,
+    targets: Option<Vec<f32>>,
+    feature_names: Vec<String>,
+    target_name: Option<String>,
+}
+
+fn parse_csv_numeric(text: &str, config: &LoadConfig) -> Result<ParsedTabular> {
+    let all_lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if all_lines.is_empty() {
+        return Err(Error::InvalidDataFormat {
+            details: "dataset has no non-empty rows".to_string(),
+        });
+    }
+
+    let (header_opt, data_lines) = if config.has_header {
+        let header = split_row(all_lines[0], config.delimiter);
+        (Some(header), &all_lines[1..])
+    } else {
+        (None, &all_lines[..])
+    };
+
+    if data_lines.is_empty() {
+        return Err(Error::InvalidDataFormat {
+            details: "dataset has header but no data rows".to_string(),
+        });
+    }
+
+    let first_fields = split_row(data_lines[0], config.delimiter);
+    let total_cols = first_fields.len();
+    if total_cols == 0 {
+        return Err(Error::InvalidDataFormat {
+            details: "dataset first row has zero columns".to_string(),
+        });
+    }
+
+    if let Some(target_idx) = config.target_column {
+        if target_idx >= total_cols {
+            return Err(Error::InvalidDataFormat {
+                details: format!(
+                    "target_column {target_idx} out of bounds for {total_cols} columns"
+                ),
+            });
+        }
+        if total_cols < 2 {
+            return Err(Error::InvalidDataFormat {
+                details: "target_column requires at least 2 columns".to_string(),
+            });
+        }
+    }
+
+    let feature_cols = if config.target_column.is_some() {
+        total_cols - 1
+    } else {
+        total_cols
+    };
+
+    let mut features = Vec::with_capacity(data_lines.len() * feature_cols);
+    let mut targets = config.target_column.map(|_| Vec::with_capacity(data_lines.len()));
+
+    for (row_index, line) in data_lines.iter().enumerate() {
+        let fields = split_row(line, config.delimiter);
+        if fields.len() != total_cols {
+            return Err(Error::InvalidDataFormat {
+                details: format!(
+                    "row {} has {} columns, expected {}",
+                    row_index + 1,
+                    fields.len(),
+                    total_cols
+                ),
+            });
+        }
+
+        for (col_index, raw) in fields.iter().enumerate() {
+            let value = raw.parse::<f32>().map_err(|error| Error::InvalidDataFormat {
+                details: format!(
+                    "cannot parse numeric value at row {}, col {}: '{}' ({error})",
+                    row_index + 1,
+                    col_index + 1,
+                    raw
+                ),
+            })?;
+
+            if Some(col_index) == config.target_column {
+                if let Some(target_vec) = &mut targets {
+                    target_vec.push(value);
+                }
+            } else {
+                features.push(value);
+            }
+        }
+    }
+
+    apply_normalization(&mut features, data_lines.len(), feature_cols, &config.normalization);
+
+    let header_names = header_opt.map(|parts| {
+        parts
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>()
+    });
+    let (feature_names, target_name) = derive_column_names(header_names, total_cols, config.target_column);
+
+    Ok(ParsedTabular {
+        rows: data_lines.len(),
+        feature_cols,
+        features,
+        targets,
+        feature_names,
+        target_name,
+    })
+}
+
+fn split_row(line: &str, delimiter: char) -> Vec<String> {
+    line.split(delimiter)
+        .map(|field| field.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+fn derive_column_names(
+    header: Option<Vec<String>>,
+    total_cols: usize,
+    target_column: Option<usize>,
+) -> (Vec<String>, Option<String>) {
+    let default_names: Vec<String> = (0..total_cols).map(|idx| format!("col_{idx}")).collect();
+    let names = header.unwrap_or(default_names);
+
+    if let Some(target_idx) = target_column {
+        let mut feature_names = Vec::with_capacity(total_cols - 1);
+        let mut target_name = None;
+        for (idx, name) in names.into_iter().enumerate() {
+            if idx == target_idx {
+                target_name = Some(name);
+            } else {
+                feature_names.push(name);
+            }
+        }
+        (feature_names, target_name)
+    } else {
+        (names, None)
+    }
+}
+
+fn apply_normalization(values: &mut [f32], rows: usize, cols: usize, normalization: &Normalization) {
+    match normalization {
+        Normalization::None => {}
+        Normalization::Standard => normalize_standard(values, rows, cols),
+        Normalization::MinMax => normalize_minmax(values, rows, cols),
+    }
+}
+
+fn normalize_standard(values: &mut [f32], rows: usize, cols: usize) {
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    for col in 0..cols {
+        let mean = (0..rows).map(|r| values[r * cols + col]).sum::<f32>() / rows as f32;
+        let variance = (0..rows)
+            .map(|r| {
+                let diff = values[r * cols + col] - mean;
+                diff * diff
+            })
+            .sum::<f32>()
+            / rows as f32;
+        let stddev = variance.sqrt();
+        if stddev <= f32::EPSILON {
+            continue;
+        }
+        for row in 0..rows {
+            let idx = row * cols + col;
+            values[idx] = (values[idx] - mean) / stddev;
+        }
+    }
+}
+
+fn normalize_minmax(values: &mut [f32], rows: usize, cols: usize) {
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    for col in 0..cols {
+        let mut min_v = values[col];
+        let mut max_v = values[col];
+        for row in 1..rows {
+            let v = values[row * cols + col];
+            if v < min_v {
+                min_v = v;
+            }
+            if v > max_v {
+                max_v = v;
+            }
+        }
+
+        let range = max_v - min_v;
+        if range <= f32::EPSILON {
+            continue;
+        }
+        for row in 0..rows {
+            let idx = row * cols + col;
+            values[idx] = (values[idx] - min_v) / range;
+        }
     }
 }
 
@@ -722,6 +1074,65 @@ mod tests {
             .all(|entry| entry.path.ends_with("visible.txt")));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loads_csv_into_feature_and_target_tensors() {
+        let csv = "f1,f2,target\n1.0,10.0,0\n2.0,20.0,1\n3.0,30.0,0\n";
+        let config = LoadConfig {
+            target_column: Some(2),
+            ..LoadConfig::default()
+        };
+
+        let dataset = TrainingDataLoader::load_from_text(csv, &config).unwrap();
+        assert_eq!(dataset.features.shape().dims(), &[3, 2]);
+        assert_eq!(dataset.targets.as_ref().unwrap().shape().dims(), &[3, 1]);
+        assert_eq!(dataset.feature_names, vec!["f1".to_string(), "f2".to_string()]);
+        assert_eq!(dataset.target_name, Some("target".to_string()));
+        assert_eq!(dataset.features.data(), &[1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
+        assert_eq!(dataset.targets.as_ref().unwrap().data(), &[0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn applies_standard_normalization() {
+        let csv = "a,b\n1.0,10.0\n2.0,20.0\n3.0,30.0\n";
+        let config = LoadConfig {
+            target_column: None,
+            normalization: Normalization::Standard,
+            ..LoadConfig::default()
+        };
+
+        let dataset = TrainingDataLoader::load_from_text(csv, &config).unwrap();
+        let data = dataset.features.data();
+        // First column should be approximately [-1.2247, 0, 1.2247]
+        assert!((data[0] + 1.2247449).abs() < 1e-4);
+        assert!(data[2].abs() < 1e-6);
+        assert!((data[4] - 1.2247449).abs() < 1e-4);
+    }
+
+    #[test]
+    fn splits_train_and_validation_sets() {
+        let csv = "x,y,target\n1,10,0\n2,20,1\n3,30,0\n4,40,1\n5,50,0\n";
+        let config = LoadConfig {
+            target_column: Some(2),
+            ..LoadConfig::default()
+        };
+
+        let dataset = TrainingDataLoader::load_from_text(csv, &config).unwrap();
+        let (train, valid) = TrainingDataLoader::train_valid_split(&dataset, 0.4).unwrap();
+
+        assert_eq!(train.features.shape().dims(), &[3, 2]);
+        assert_eq!(valid.features.shape().dims(), &[2, 2]);
+        assert_eq!(train.targets.as_ref().unwrap().shape().dims(), &[3, 1]);
+        assert_eq!(valid.targets.as_ref().unwrap().shape().dims(), &[2, 1]);
+    }
+
+    #[test]
+    fn rejects_non_numeric_csv_values() {
+        let csv = "x,y\n1.0,cat\n";
+        let config = LoadConfig::default();
+        let result = TrainingDataLoader::load_from_text(csv, &config);
+        assert!(result.is_err());
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 kpodjito-core-error = { path = "../error" }
+kpodjito-core-tensor = { path = "../tensor" }
