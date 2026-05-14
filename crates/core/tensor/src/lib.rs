@@ -72,6 +72,7 @@ impl<T: Scalar> Tensor<T> {
             .ok_or(Error::InvalidIndex { index, len: self.data.len() })
     }
 
+    #[inline]
     pub fn map<F>(&self, mut function: F) -> Self
     where
         F: FnMut(T) -> T,
@@ -113,10 +114,12 @@ impl<T: Scalar> Tensor<T> {
         self.zip_map(other, |left, right| left - right)
     }
 
+    #[inline]
     pub fn mul_scalar(&self, scalar: T) -> Self {
         self.map(|value| value * scalar)
     }
 
+    #[inline]
     pub fn sum(&self) -> T {
         math_sum(&self.data)
     }
@@ -181,6 +184,7 @@ impl<T: Scalar> Tensor<T> {
     }
 
     // --- Broadcasting helpers ---
+    #[inline]
     fn strides(shape: &[usize]) -> Vec<usize> {
         let mut strides = vec![1; shape.len()];
         for i in (0..shape.len()).rev() {
@@ -191,6 +195,7 @@ impl<T: Scalar> Tensor<T> {
         strides
     }
 
+    #[inline]
     fn coords_from_flat(mut idx: usize, dims: &[usize]) -> Vec<usize> {
         let mut coords = vec![0; dims.len()];
         for i in (0..dims.len()).rev() {
@@ -201,6 +206,7 @@ impl<T: Scalar> Tensor<T> {
         coords
     }
 
+    #[inline]
     fn flat_index_from_coords(coords: &[usize], strides: &[usize]) -> usize {
         coords.iter().zip(strides.iter()).map(|(&c, &s)| c * s).sum()
     }

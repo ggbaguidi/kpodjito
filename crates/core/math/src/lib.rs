@@ -119,6 +119,7 @@ impl Shape {
     }
 }
 
+#[inline]
 pub fn dot<T: Scalar>(left: &[T], right: &[T]) -> Result<T> {
     if left.len() != right.len() {
         return Err(Error::DimensionMismatch {
@@ -133,6 +134,7 @@ pub fn dot<T: Scalar>(left: &[T], right: &[T]) -> Result<T> {
         .fold(T::zero(), |accumulator, (&a, &b)| accumulator + a * b))
 }
 
+#[inline]
 pub fn sum<T: Scalar>(values: &[T]) -> T {
     values
         .iter()
@@ -140,6 +142,7 @@ pub fn sum<T: Scalar>(values: &[T]) -> T {
         .fold(T::zero(), |accumulator, value| accumulator + value)
 }
 
+#[inline]
 pub fn mean<T: Scalar>(values: &[T]) -> Result<T> {
     if values.is_empty() {
         return Err(Error::EmptyTensor);
@@ -148,6 +151,7 @@ pub fn mean<T: Scalar>(values: &[T]) -> Result<T> {
     Ok(sum(values) / T::from_f64(values.len() as f64))
 }
 
+#[inline]
 pub fn l2_norm<T: Scalar>(values: &[T]) -> Result<T> {
     dot(values, values).map(|value| value.sqrt())
 }
