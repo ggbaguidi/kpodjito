@@ -1,0 +1,8 @@
+[package]
+name = "kpodjito-core-tensor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kpodjito-core-error = { path = "../error" }
+kpodjito-core-math = { path = "../math" }

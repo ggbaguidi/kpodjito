@@ -1,0 +1,9 @@
+[package]
+name = "kpodjito-core-autograd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kpodjito-core-error = { path = "../error" }
+kpodjito-core-tensor = { path = "../tensor" }
+kpodjito-core-math = { path = "../math" }

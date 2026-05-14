@@ -1,0 +1,7 @@
+[package]
+name = "kpodjito-core-random"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kpodjito-core-error = { path = "../error" }

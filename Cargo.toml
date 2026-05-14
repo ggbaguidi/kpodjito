@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = [
+	"crates/core/error",
+	"crates/core/math",
+	"crates/core/tensor",
+	"crates/core/random",
+	"crates/core/autograd",
+	"crates/core/domain",
+	"crates/core/ports",
+	"crates/core/use_cases",
+	"crates/adapters/left",
+	"crates/adapters/right",
+]

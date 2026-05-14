@@ -1,0 +1,9 @@
+[package]
+name = "kpodjito-adapter-right"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kpodjito-core-error = { path = "../../core/error" }
+kpodjito-core-ports = { path = "../../core/ports" }
+kpodjito-core-use-cases = { path = "../../core/use_cases" }
