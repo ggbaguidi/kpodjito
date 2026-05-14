@@ -4,6 +4,7 @@ members = [
 	"crates/core/error",
 	"crates/core/math",
 	"crates/core/tensor",
+	"crates/core/data_processing",
 	"crates/core/random",
 	"crates/core/autograd",
 	"crates/core/domain",

@@ -9,6 +9,8 @@ pub enum Error {
     ShapeMismatch { left: Vec<usize>, right: Vec<usize> },
     DimensionMismatch { expected: usize, actual: usize },
     InvalidIndex { index: usize, len: usize },
+    InvalidDataFormat { details: String },
+    UnsupportedDataType { details: String },
 }
 
 impl fmt::Display for Error {
@@ -24,6 +26,12 @@ impl fmt::Display for Error {
             }
             Self::InvalidIndex { index, len } => {
                 write!(f, "invalid index {index} for length {len}")
+            }
+            Self::InvalidDataFormat { details } => {
+                write!(f, "invalid data format: {details}")
+            }
+            Self::UnsupportedDataType { details } => {
+                write!(f, "unsupported data type: {details}")
             }
         }
     }
